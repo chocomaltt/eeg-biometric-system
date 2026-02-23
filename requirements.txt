@@ -1,0 +1,7 @@
+dotenv
+ipykernel
+joblib
+matplotlib
+mne
+pandas
+torch
