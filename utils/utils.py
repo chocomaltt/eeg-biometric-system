@@ -14,22 +14,24 @@ def ch_rename(path, ch_names):
 
     return raw
 
-def sliding_windows(raw_data, sampling_rate=250, window_sec=2, overlap_sec=1):
+def sliding_windows(raw_data, window_sec=2, overlap_sec=1):
     """
     Sliding windows with stride.
     """
     all_segments = []
+    all_labels = []
 
-    for data in raw_data:
+    for subject_id, data in enumerate(raw_data):
         sfreq = int(data.info['sfreq'])
 
         eeg_data = data.get_data()
 
         window_size = window_sec * sfreq
-        stride_size = (window_size - overlap_sec) * sfreq
+        stride_size = os.getenv("STRIDE")
 
         for start in range(0, eeg_data.shape[1] - window_size + 1, stride_size):
             end = start + window_size
             all_segments.append(eeg_data[:, start:end])
+            all_labels.append(subject_id)
 
-    return all_segments
+    return all_segments, all_labels
