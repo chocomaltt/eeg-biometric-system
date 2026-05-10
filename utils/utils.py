@@ -2,6 +2,18 @@ import mne
 import os
 import numpy as np
 
+WINDOWS_SETUP=[
+    [1, 0.5],
+    [1, 1],
+    [1.5, 0.5],
+    [1.5, 1],
+    [1.5, 1.5],
+    [2, 0.5],
+    [2, 1],
+    [2, 1.5],
+    [2, 2]
+]
+
 # Remove dot (.) from channels name
 def ch_rename(path, ch_names):
     """
@@ -14,7 +26,7 @@ def ch_rename(path, ch_names):
 
     return raw
 
-def sliding_windows(raw_data):
+def sliding_windows(raw_data, window_size, stride):
     """
     Sliding windows with stride.
     """
@@ -23,14 +35,13 @@ def sliding_windows(raw_data):
 
     for subject_id, data in enumerate(raw_data):
         sfreq = int(data.info['sfreq'])
-
         eeg_data = data.get_data()
 
-        window_size = int(float(os.getenv("WINDOW_SIZE")) * sfreq)
-        stride_size = int(float(os.getenv("STRIDE")) * sfreq)
+        window_samples = int(window_size * sfreq)
+        stride_samples = int(stride * sfreq)
 
-        for start in range(0, eeg_data.shape[1] - window_size + 1, stride_size):
-            end = start + window_size
+        for start in range(0, eeg_data.shape[1] - window_samples + 1, stride_samples):
+            end = start + window_samples
             all_segments.append(eeg_data[:, start:end])
             all_labels.append(subject_id)
 
