@@ -19,8 +19,8 @@ WINDOW_CONFIGS = [
     [2, 1.5],
     [2, 2]
 ]
-SEEDS = [42, 0, 1, 123, 2024, 7, 13, 99, 1337, 314]
-# SEEDS = [0, 1, 123, 2024, 7, 13, 99, 1337, 314]
+# SEEDS = [42, 0, 1, 123, 2024, 7, 13, 99, 1337, 314]
+SEEDS = [0, 1, 123, 2024, 7, 13, 99, 1337, 314]
 
 def run_training(data_type, window_size, stride, seed):
     """Run training notebook with specific config."""
