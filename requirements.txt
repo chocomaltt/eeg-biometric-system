@@ -4,4 +4,9 @@ joblib
 matplotlib
 mne
 pandas
+psutil
+pytorch-metric-learning
+qdrant-client
+scikit-learn
 torch
+wandb

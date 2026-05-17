@@ -1,3 +1,7 @@
 Dataset/
 .env
 utils/__pycache__/
+qdrant_storage/
+wandb/
+best_eeg_biometric_model.pth
+best_eeg_embedding_model.pth
