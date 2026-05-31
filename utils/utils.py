@@ -1,6 +1,9 @@
 import mne
 import os
 import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv("../.env")
 
 WINDOWS_SETUP=[
     [1, 0.5],
@@ -26,23 +29,24 @@ def ch_rename(path, ch_names):
 
     return raw
 
-def sliding_windows(raw_data, window_size, stride):
+def sliding_windows(raw_data, window_size, stride, sfreq):
     """
     Sliding windows with stride.
     """
     all_segments = []
     all_labels = []
 
-    for subject_id, data in enumerate(raw_data):
-        sfreq = int(data.info['sfreq'])
-        eeg_data = data.get_data()
+    for i in range (int(os.getenv("NUM_CLASSES"))):
+        # print(sfreq)
+        # sfreq = int(sfreq)
+        eeg_data = raw_data[i]
 
-        window_samples = int(window_size * sfreq)
-        stride_samples = int(stride * sfreq)
+        window_samples = int(window_size * int(sfreq))
+        stride_samples = int(stride * int(sfreq))
 
         for start in range(0, eeg_data.shape[1] - window_samples + 1, stride_samples):
             end = start + window_samples
             all_segments.append(eeg_data[:, start:end])
-            all_labels.append(subject_id)
+            all_labels.append(i)
 
     return all_segments, all_labels

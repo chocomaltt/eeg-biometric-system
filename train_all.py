@@ -2,7 +2,6 @@
 """Batch training script for EEG biometric models."""
 
 import os
-import sys
 import subprocess
 from itertools import product
 
@@ -19,8 +18,7 @@ WINDOW_CONFIGS = [
     [2, 1.5],
     [2, 2]
 ]
-# SEEDS = [42, 0, 1, 123, 2024, 7, 13, 99, 1337, 314]
-SEEDS = [0, 1, 123, 2024, 7, 13, 99, 1337, 314]
+SEEDS = [0, 1, 42, 123, 2024]
 
 def run_training(data_type, window_size, stride, seed):
     """Run training notebook with specific config."""

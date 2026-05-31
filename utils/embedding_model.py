@@ -5,7 +5,7 @@ from torch.nn import SELU, ELU
 import torch
 
 class embedding_model(Module):
-    def __init__(self, in_channels, num_classes):
+    def __init__(self):
         super(embedding_model, self).__init__()
 
         self.input = Sequential(
@@ -54,7 +54,7 @@ class embedding_model(Module):
 
         x = self.input(x)
         x = self.conv2_temporal(x)
-        x = self.batch_normalization(x)
+        x = self.batch_normalization(x) 
         x = self.elu(x)
         x = self.MaxPool2d(x)
         x = self.conv2_spatial(x)
