@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -153,3 +154,82 @@ def validate_signal_array(array: np.ndarray) -> np.ndarray:
         "Expected array shape (64, 320) for one window or (N, 64, 320) for a batch; "
         f"got {tuple(array.shape)}"
     )
+
+
+def normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
+    values = np.asarray(embeddings, dtype=np.float32)
+    if values.ndim != 2:
+        raise PredictionError(f"Expected 2D embeddings, got shape {tuple(values.shape)}")
+    norms = np.linalg.norm(values, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    return values / norms
+
+
+def identify_from_embeddings(
+    query_embeddings: np.ndarray,
+    gallery_embeddings: np.ndarray,
+    gallery_labels: np.ndarray,
+    top_k: int = 5,
+) -> dict:
+    if len(gallery_embeddings) == 0:
+        raise PredictionError("Enrollment gallery is empty")
+
+    query = normalize_embeddings(query_embeddings)
+    gallery = normalize_embeddings(gallery_embeddings)
+    labels = np.asarray(gallery_labels)
+    limit = max(1, min(top_k, len(gallery)))
+    similarity_matrix = query @ gallery.T
+    windows: list[dict] = []
+
+    for row in similarity_matrix:
+        top_indices = np.argsort(row)[::-1][:limit]
+        best_index = int(top_indices[0])
+        top_matches = [
+            {
+                "subject_id": int(labels[index]),
+                "similarity": float(row[index]),
+            }
+            for index in top_indices
+        ]
+        windows.append(
+            {
+                "predicted_subject_id": int(labels[best_index]),
+                "similarity": float(row[best_index]),
+                "top_matches": top_matches,
+            }
+        )
+
+    return {"windows": windows}
+
+
+def aggregate_window_results(
+    window_results: list[dict],
+    claimed_subject_id: int | None = None,
+) -> dict:
+    if not window_results:
+        raise PredictionError("No prediction windows were produced")
+
+    vote_counts = Counter(int(window["predicted_subject_id"]) for window in window_results)
+    predicted_subject_id, vote_count = vote_counts.most_common(1)[0]
+    similarities = np.array([float(window["similarity"]) for window in window_results], dtype=np.float32)
+    max_similarity = float(np.max(similarities))
+    result = {
+        "predicted_subject_id": int(predicted_subject_id),
+        "vote_count": int(vote_count),
+        "window_count": len(window_results),
+        "mean_similarity": float(np.mean(similarities)),
+        "max_similarity": max_similarity,
+        "windows": window_results,
+    }
+
+    if claimed_subject_id is not None:
+        accepted = predicted_subject_id == claimed_subject_id and max_similarity >= VERIFICATION_THRESHOLD
+        result.update(
+            {
+                "claimed_subject_id": int(claimed_subject_id),
+                "verification_threshold": VERIFICATION_THRESHOLD,
+                "accepted": bool(accepted),
+            }
+        )
+
+    return result

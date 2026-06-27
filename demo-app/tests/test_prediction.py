@@ -5,9 +5,12 @@ import pytest
 
 from prediction import (
     PredictionError,
+    aggregate_window_results,
     array_from_npy_bytes,
     discover_configurations,
     get_config,
+    identify_from_embeddings,
+    normalize_embeddings,
     token_to_model_value,
     validate_signal_array,
 )
@@ -103,3 +106,64 @@ def test_validate_signal_array_accepts_batch():
 def test_validate_signal_array_rejects_wrong_shape():
     with pytest.raises(PredictionError, match="Expected array shape"):
         validate_signal_array(np.zeros((32, 320), dtype=np.float32))
+
+
+def test_normalize_embeddings_returns_unit_vectors():
+    embeddings = np.array([[3.0, 4.0], [0.0, 2.0]], dtype=np.float32)
+
+    result = normalize_embeddings(embeddings)
+
+    assert np.allclose(np.linalg.norm(result, axis=1), np.array([1.0, 1.0]))
+
+
+def test_identify_from_embeddings_returns_top_matches():
+    query = np.array([[1.0, 0.0]], dtype=np.float32)
+    gallery = np.array(
+        [
+            [0.0, 1.0],
+            [0.8, 0.2],
+            [1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    labels = np.array([7, 8, 9], dtype=np.int64)
+
+    result = identify_from_embeddings(query, gallery, labels, top_k=2)
+
+    assert result["windows"][0]["predicted_subject_id"] == 9
+    assert result["windows"][0]["similarity"] == pytest.approx(1.0)
+    assert result["windows"][0]["top_matches"] == [
+        {"subject_id": 9, "similarity": pytest.approx(1.0)},
+        {"subject_id": 8, "similarity": pytest.approx(0.9701425)},
+    ]
+
+
+def test_aggregate_window_results_uses_majority_vote_and_threshold():
+    windows = [
+        {"predicted_subject_id": 4, "similarity": 0.70, "top_matches": []},
+        {"predicted_subject_id": 4, "similarity": 0.80, "top_matches": []},
+        {"predicted_subject_id": 5, "similarity": 0.95, "top_matches": []},
+    ]
+
+    result = aggregate_window_results(windows, claimed_subject_id=4)
+
+    assert result["predicted_subject_id"] == 4
+    assert result["window_count"] == 3
+    assert result["mean_similarity"] == pytest.approx(0.8166666)
+    assert result["max_similarity"] == pytest.approx(0.95)
+    assert result["claimed_subject_id"] == 4
+    assert result["verification_threshold"] == pytest.approx(0.6216)
+    assert result["accepted"] is True
+
+
+def test_aggregate_window_results_rejects_wrong_claimed_subject():
+    windows = [
+        {"predicted_subject_id": 4, "similarity": 0.90, "top_matches": []},
+        {"predicted_subject_id": 4, "similarity": 0.91, "top_matches": []},
+    ]
+
+    result = aggregate_window_results(windows, claimed_subject_id=3)
+
+    assert result["predicted_subject_id"] == 4
+    assert result["claimed_subject_id"] == 3
+    assert result["accepted"] is False
