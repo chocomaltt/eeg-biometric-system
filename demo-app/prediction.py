@@ -16,7 +16,7 @@ PROJECT_ROOT = APP_DIR.parent
 DATASET_DIR = PROJECT_ROOT / "Dataset" / "preprocessed_research_final_v4_90"
 MODELS_DIR = PROJECT_ROOT / "models"
 CACHE_DIR = APP_DIR / ".cache"
-MODEL_PREFIX = "embedding_v3.1"
+MODEL_PREFIX = "embedding_v4"
 TRAIN_SPLIT = "80"
 MODEL_SUFFIX = "b32_e100_margin_0.2.pth"
 SIGNAL_CHANNELS = 64
@@ -82,6 +82,28 @@ def model_filename(data_type: str, seed: int, window_token: str, stride_token: s
     )
 
 
+def find_model_path(
+    models_dir: Path,
+    data_type: str,
+    seed: int,
+    window_token: str,
+    stride_token: str,
+) -> Path | None:
+    exact_path = models_dir / model_filename(data_type, seed, window_token, stride_token)
+    if exact_path.exists():
+        return exact_path
+
+    window_value = token_to_model_value(window_token)
+    stride_value = token_to_model_value(stride_token)
+    pattern = f"*_{data_type}_train_*_{seed}_{window_value}_{stride_value}_*.pth"
+    candidates = sorted(models_dir.glob(pattern))
+    if not candidates:
+        return None
+
+    preferred = [path for path in candidates if path.name.startswith(f"{MODEL_PREFIX}_")]
+    return (preferred or candidates)[0]
+
+
 def discover_configurations(
     dataset_dir: Path = DATASET_DIR,
     models_dir: Path = MODELS_DIR,
@@ -105,9 +127,9 @@ def discover_configurations(
         stride_token = match.group("stride")
         seed = int(match.group("seed"))
         y_path = dataset_dir / f"y_{data_type}_train_{window_token}_{stride_token}_seed{seed}.npy"
-        m_path = models_dir / model_filename(data_type, seed, window_token, stride_token)
+        m_path = find_model_path(models_dir, data_type, seed, window_token, stride_token)
 
-        if y_path.exists() and m_path.exists():
+        if y_path.exists() and m_path is not None:
             configs.append(
                 ModelConfig(
                     data_type=data_type,
@@ -144,16 +166,17 @@ def array_from_npy_bytes(content: bytes) -> np.ndarray:
         raise PredictionError("Uploaded file must be a valid .npy file") from exc
 
 
-def validate_signal_array(array: np.ndarray) -> np.ndarray:
-    if array.ndim == 2 and array.shape == (SIGNAL_CHANNELS, SIGNAL_SAMPLES):
+def validate_signal_array(array: np.ndarray, expected_samples: int = SIGNAL_SAMPLES) -> np.ndarray:
+    expected_shape = (SIGNAL_CHANNELS, expected_samples)
+    if array.ndim == 2 and array.shape == expected_shape:
         return array[np.newaxis, :, :].astype(np.float32, copy=False)
 
-    if array.ndim == 3 and array.shape[1:] == (SIGNAL_CHANNELS, SIGNAL_SAMPLES):
+    if array.ndim == 3 and array.shape[1:] == expected_shape:
         return array.astype(np.float32, copy=False)
 
     raise PredictionError(
-        "Expected array shape (64, 320) for one window or (N, 64, 320) for a batch; "
-        f"got {tuple(array.shape)}"
+        f"Expected array shape {expected_shape} for one window or (N, {SIGNAL_CHANNELS}, {expected_samples}) "
+        f"for a batch; got {tuple(array.shape)}"
     )
 
 
@@ -256,6 +279,20 @@ def _cache_path(config: ModelConfig) -> Path:
     return CACHE_DIR / f"gallery_{safe_name}.npz"
 
 
+def expected_samples_for_config(config: ModelConfig) -> int:
+    try:
+        train_array = np.load(config.x_train_path, allow_pickle=False, mmap_mode="r")
+    except Exception as exc:
+        raise PredictionError(f"Could not read training array shape: {config.x_train_path.name}") from exc
+
+    if train_array.ndim != 3 or train_array.shape[1] != SIGNAL_CHANNELS:
+        raise PredictionError(
+            f"Training array for selected configuration must have shape (N, {SIGNAL_CHANNELS}, samples); "
+            f"got {tuple(train_array.shape)}"
+        )
+    return int(train_array.shape[2])
+
+
 def load_model(config: ModelConfig, device: str | None = None):
     selected_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     cache_key = f"{config.config_id}:{selected_device}"
@@ -285,8 +322,9 @@ def embed_signals(
     signals: np.ndarray,
     device: str,
     batch_size: int = 128,
+    expected_samples: int = SIGNAL_SAMPLES,
 ) -> np.ndarray:
-    validated = validate_signal_array(signals)
+    validated = validate_signal_array(signals, expected_samples=expected_samples)
     chunks: list[np.ndarray] = []
 
     with torch.no_grad():
@@ -317,14 +355,17 @@ def load_or_build_gallery(config: ModelConfig, model, device: str) -> Gallery:
     if not config.x_train_path.exists() or not config.y_train_path.exists():
         raise PredictionError("Training arrays for the selected configuration are missing")
 
-    signals = validate_signal_array(np.load(config.x_train_path, allow_pickle=False))
+    signals = validate_signal_array(
+        np.load(config.x_train_path, allow_pickle=False),
+        expected_samples=expected_samples_for_config(config),
+    )
     labels = np.load(config.y_train_path, allow_pickle=False).astype(np.int64, copy=False)
     if len(signals) != len(labels):
         raise PredictionError(
             f"Training signal count {len(signals)} does not match label count {len(labels)}"
         )
 
-    embeddings = embed_signals(model, signals, device)
+    embeddings = embed_signals(model, signals, device, expected_samples=signals.shape[2])
     gallery = Gallery(embeddings=embeddings, labels=labels)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(cache_path, embeddings=gallery.embeddings, labels=gallery.labels)
@@ -339,10 +380,11 @@ def predict_signal(
     top_k: int = 5,
 ) -> dict:
     config = get_config(config_id)
-    signals = validate_signal_array(array)
+    expected_samples = expected_samples_for_config(config)
+    signals = validate_signal_array(array, expected_samples=expected_samples)
     model, device = load_model(config)
     gallery = load_or_build_gallery(config, model, device)
-    query_embeddings = embed_signals(model, signals, device)
+    query_embeddings = embed_signals(model, signals, device, expected_samples=expected_samples)
     identified = identify_from_embeddings(
         query_embeddings=query_embeddings,
         gallery_embeddings=gallery.embeddings,
