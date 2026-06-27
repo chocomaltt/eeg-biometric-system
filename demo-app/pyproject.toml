@@ -1,0 +1,16 @@
+[project]
+name = "demo-app"
+version = "0.1.0"
+description = "FastAPI demo for EEG biometric identification and verification"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "httpx",
+    "jinja2",
+    "numpy",
+    "pytest",
+    "python-multipart",
+    "torch",
+    "uvicorn",
+]
