@@ -6,9 +6,10 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
+import torch
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
@@ -232,4 +233,131 @@ def aggregate_window_results(
             }
         )
 
+    return result
+
+
+@dataclass(frozen=True)
+class Gallery:
+    embeddings: np.ndarray
+    labels: np.ndarray
+
+
+_MODEL_CACHE: dict[str, tuple[Any, str]] = {}
+_GALLERY_CACHE: dict[str, Gallery] = {}
+
+
+def clear_caches() -> None:
+    _MODEL_CACHE.clear()
+    _GALLERY_CACHE.clear()
+
+
+def _cache_path(config: ModelConfig) -> Path:
+    safe_name = config.config_id.replace(":", "_")
+    return CACHE_DIR / f"gallery_{safe_name}.npz"
+
+
+def load_model(config: ModelConfig, device: str | None = None):
+    selected_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    cache_key = f"{config.config_id}:{selected_device}"
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+
+    if not config.model_path.exists():
+        raise PredictionError(f"Model file not found: {config.model_path}")
+
+    try:
+        model = torch.load(
+            config.model_path,
+            map_location=selected_device,
+            weights_only=False,
+        )
+        model.to(selected_device)
+        model.eval()
+    except Exception as exc:
+        raise PredictionError(f"Could not load model: {config.model_path.name}") from exc
+
+    _MODEL_CACHE[cache_key] = (model, selected_device)
+    return model, selected_device
+
+
+def embed_signals(
+    model,
+    signals: np.ndarray,
+    device: str,
+    batch_size: int = 128,
+) -> np.ndarray:
+    validated = validate_signal_array(signals)
+    chunks: list[np.ndarray] = []
+
+    with torch.no_grad():
+        for start in range(0, len(validated), batch_size):
+            batch = torch.from_numpy(validated[start : start + batch_size]).float().to(device)
+            embeddings = model(batch).detach().cpu().numpy()
+            chunks.append(embeddings.astype(np.float32, copy=False))
+
+    if not chunks:
+        raise PredictionError("No signals were available for embedding")
+    return normalize_embeddings(np.concatenate(chunks, axis=0))
+
+
+def load_or_build_gallery(config: ModelConfig, model, device: str) -> Gallery:
+    if config.config_id in _GALLERY_CACHE:
+        return _GALLERY_CACHE[config.config_id]
+
+    cache_path = _cache_path(config)
+    if cache_path.exists():
+        cached = np.load(cache_path, allow_pickle=False)
+        gallery = Gallery(
+            embeddings=normalize_embeddings(cached["embeddings"]),
+            labels=cached["labels"].astype(np.int64, copy=False),
+        )
+        _GALLERY_CACHE[config.config_id] = gallery
+        return gallery
+
+    if not config.x_train_path.exists() or not config.y_train_path.exists():
+        raise PredictionError("Training arrays for the selected configuration are missing")
+
+    signals = validate_signal_array(np.load(config.x_train_path, allow_pickle=False))
+    labels = np.load(config.y_train_path, allow_pickle=False).astype(np.int64, copy=False)
+    if len(signals) != len(labels):
+        raise PredictionError(
+            f"Training signal count {len(signals)} does not match label count {len(labels)}"
+        )
+
+    embeddings = embed_signals(model, signals, device)
+    gallery = Gallery(embeddings=embeddings, labels=labels)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(cache_path, embeddings=gallery.embeddings, labels=gallery.labels)
+    _GALLERY_CACHE[config.config_id] = gallery
+    return gallery
+
+
+def predict_signal(
+    config_id: str,
+    array: np.ndarray,
+    claimed_subject_id: int | None = None,
+    top_k: int = 5,
+) -> dict:
+    config = get_config(config_id)
+    signals = validate_signal_array(array)
+    model, device = load_model(config)
+    gallery = load_or_build_gallery(config, model, device)
+    query_embeddings = embed_signals(model, signals, device)
+    identified = identify_from_embeddings(
+        query_embeddings=query_embeddings,
+        gallery_embeddings=gallery.embeddings,
+        gallery_labels=gallery.labels,
+        top_k=top_k,
+    )
+    result = aggregate_window_results(
+        identified["windows"],
+        claimed_subject_id=claimed_subject_id,
+    )
+    result.update(
+        {
+            "config_id": config.config_id,
+            "config_name": config.display_name,
+            "device": device,
+        }
+    )
     return result

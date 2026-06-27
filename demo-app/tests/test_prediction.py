@@ -4,13 +4,16 @@ import numpy as np
 import pytest
 
 from prediction import (
+    Gallery,
     PredictionError,
     aggregate_window_results,
     array_from_npy_bytes,
+    clear_caches,
     discover_configurations,
     get_config,
     identify_from_embeddings,
     normalize_embeddings,
+    predict_signal,
     token_to_model_value,
     validate_signal_array,
 )
@@ -167,3 +170,53 @@ def test_aggregate_window_results_rejects_wrong_claimed_subject():
     assert result["predicted_subject_id"] == 4
     assert result["claimed_subject_id"] == 3
     assert result["accepted"] is False
+
+
+class FakeModel:
+    def eval(self):
+        return self
+
+    def to(self, device):
+        return self
+
+
+def test_predict_signal_uses_gallery_and_returns_aggregate(monkeypatch, tmp_path):
+    clear_caches()
+    dataset_dir = tmp_path / "dataset"
+    models_dir = tmp_path / "models"
+    dataset_dir.mkdir()
+    models_dir.mkdir()
+
+    x_path = dataset_dir / "X_eo_train_2_1_seed42.npy"
+    y_path = dataset_dir / "y_eo_train_2_1_seed42.npy"
+    model_path = models_dir / "embedding_v3.1_eo_train_80_42_2_1_b32_e100_margin_0.2.pth"
+    np.save(x_path, np.zeros((2, 64, 320), dtype=np.float32))
+    np.save(y_path, np.array([4, 5], dtype=np.int64))
+    model_path.write_bytes(b"model")
+
+    monkeypatch.setattr("prediction.DATASET_DIR", dataset_dir)
+    monkeypatch.setattr("prediction.MODELS_DIR", models_dir)
+    monkeypatch.setattr("prediction.load_model", lambda config, device=None: (FakeModel(), "cpu"))
+    monkeypatch.setattr(
+        "prediction.load_or_build_gallery",
+        lambda config, model, device: Gallery(
+            embeddings=np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+            labels=np.array([4, 5], dtype=np.int64),
+        ),
+    )
+    monkeypatch.setattr(
+        "prediction.embed_signals",
+        lambda model, signals, device, batch_size=128: np.array([[1.0, 0.0]], dtype=np.float32),
+    )
+
+    result = predict_signal(
+        "eo:2:1:seed42",
+        np.zeros((64, 320), dtype=np.float32),
+        claimed_subject_id=4,
+    )
+
+    assert result["config_id"] == "eo:2:1:seed42"
+    assert result["config_name"] == "EO | window 2s | stride 1s | seed 42"
+    assert result["predicted_subject_id"] == 4
+    assert result["accepted"] is True
+    assert result["windows"][0]["top_matches"][0]["subject_id"] == 4
