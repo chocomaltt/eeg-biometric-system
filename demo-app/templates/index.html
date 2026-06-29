@@ -21,7 +21,7 @@
 </head>
 <body>
     <h1>EEG Biometric Demo</h1>
-    <p class="muted">Upload a preprocessed EEG <code>.npy</code> file shaped <code>(64, 320)</code> or <code>(N, 64, 320)</code>.</p>
+    <p class="muted">Select a raw EEG subject folder to run the fixed EO/R01 subject prediction model.</p>
 
     {% if error %}
     <div class="card error">
@@ -29,24 +29,26 @@
     </div>
     {% endif %}
 
-    <form action="/predict" method="post" enctype="multipart/form-data" class="card">
-        <label for="config_id">Model configuration</label>
-        <select id="config_id" name="config_id" required>
-            {% for config in configs %}
-            <option value="{{ config.config_id }}" {% if selected_config_id == config.config_id %}selected{% endif %}>{{ config.display_name }}</option>
+    <form action="/predict" method="post" class="card">
+        <p class="hint">
+            Using fixed model <code>{{ fixed_model_filename }}</code><br>
+            Configuration: {{ fixed_config_name }}. Raw EO/R01 files are loaded from <code>../Dataset/files/</code>.
+        </p>
+
+        <label for="subject_id">Subject</label>
+        <select id="subject_id" name="subject_id" required>
+            {% for subject in subjects %}
+            <option value="{{ subject }}" {% if subject == selected_subject_id %}selected{% endif %}>{{ subject }}</option>
             {% endfor %}
         </select>
-        {% if not configs %}
-        <p class="error card">No complete model/dataset configurations were found.</p>
+        {% if not subjects %}
+        <p class="error card">No subject folders were found under Dataset/files.</p>
         {% endif %}
-
-        <label for="signal_file">Preprocessed signal file</label>
-        <input id="signal_file" name="signal_file" type="file" accept=".npy" required>
 
         <label for="claimed_subject_id">Claimed subject ID for verification</label>
         <input id="claimed_subject_id" name="claimed_subject_id" type="number" min="0" placeholder="Leave blank for identification only">
 
-        <button type="submit" {% if not configs %}disabled{% endif %}>Predict</button>
+        <button type="submit" {% if not subjects %}disabled{% endif %}>Predict</button>
     </form>
 
     {% if result %}
@@ -54,14 +56,25 @@
         <h2>Result</h2>
         <p><strong>Configuration:</strong> {{ result.config_name }}</p>
         <p><strong>Device:</strong> {{ result.device }}</p>
+        {% if result.qdrant_collection is defined %}
+        <p><strong>Qdrant Collection:</strong> <code>{{ result.qdrant_collection }}</code></p>
+        {% endif %}
+        {% if result.subject_id is defined %}
+        <p><strong>Input Subject:</strong> {{ result.subject_id }}</p>
+        {% endif %}
         <p><strong>Predicted Subject:</strong> {{ result.predicted_subject_id }}</p>
         <p><strong>Vote Count:</strong> {{ result.vote_count }} / {{ result.window_count }}</p>
+        {% if result.mean_distance is defined %}
+        <p><strong>Mean Distance:</strong> {{ "%.4f"|format(result.mean_distance) }}</p>
+        <p><strong>Min Distance:</strong> {{ "%.4f"|format(result.min_distance) }}</p>
+        {% else %}
         <p><strong>Mean Similarity:</strong> {{ "%.4f"|format(result.mean_similarity) }}</p>
         <p><strong>Max Similarity:</strong> {{ "%.4f"|format(result.max_similarity) }}</p>
+        {% endif %}
 
         {% if result.claimed_subject_id is defined %}
         <p><strong>Claimed Subject:</strong> {{ result.claimed_subject_id }}</p>
-        <p><strong>Threshold:</strong> {{ "%.4f"|format(result.verification_threshold) }}</p>
+        <p><strong>Distance Threshold:</strong> {{ "%.4f"|format(result.verification_threshold) }}</p>
         <p><strong>Verification:</strong> {% if result.accepted %}Accepted{% else %}Rejected{% endif %}</p>
         {% endif %}
 
@@ -71,7 +84,7 @@
                 <tr>
                     <th>#</th>
                     <th>Predicted Subject</th>
-                    <th>Similarity</th>
+                    <th>Distance</th>
                     <th>Top Matches</th>
                 </tr>
             </thead>
@@ -80,10 +93,20 @@
                 <tr>
                     <td>{{ loop.index }}</td>
                     <td>{{ window.predicted_subject_id }}</td>
-                    <td>{{ "%.4f"|format(window.similarity) }}</td>
+                    <td>
+                        {% if window.distance is defined %}
+                            {{ "%.4f"|format(window.distance) }}
+                        {% else %}
+                            {{ "%.4f"|format(window.similarity) }}
+                        {% endif %}
+                    </td>
                     <td>
                         {% for match in window.top_matches %}
-                            {{ match.subject_id }} ({{ "%.4f"|format(match.similarity) }}){% if not loop.last %}, {% endif %}
+                            {% if match.distance is defined %}
+                                {{ match.subject_id }} ({{ "%.4f"|format(match.distance) }}){% if not loop.last %}, {% endif %}
+                            {% else %}
+                                {{ match.subject_id }} ({{ "%.4f"|format(match.similarity) }}){% if not loop.last %}, {% endif %}
+                            {% endif %}
                         {% endfor %}
                     </td>
                 </tr>

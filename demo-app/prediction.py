@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import sys
 from collections import Counter
@@ -8,19 +9,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+import mne
 import numpy as np
 import torch
+from qdrant_client import QdrantClient, models
+from scipy.signal import butter, filtfilt
+from scipy.stats import zscore
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 DATASET_DIR = PROJECT_ROOT / "Dataset" / "preprocessed_research_final_v4_90"
+RAW_DATASET_DIR = PROJECT_ROOT / "Dataset" / "files"
+RAW_PREPROCESSED_DIR = PROJECT_ROOT / "Dataset" / "preprocessed_research_final_v4_80"
 MODELS_DIR = PROJECT_ROOT / "models"
 CACHE_DIR = APP_DIR / ".cache"
 MODEL_PREFIX = "embedding_v4"
 TRAIN_SPLIT = "80"
-MODEL_SUFFIX = "b32_e100_margin_0.2.pth"
+MODEL_SUFFIX = "b128_e100_margin_0.2.pth"
+FIXED_MODEL_FILENAME = "embedding_v4_eo_train_80_0_1.5_0.5_b128_e100_margin_0.2.pth"
+QDRANT_COLLECTION_NAME = "embedding_v4_eo_train_80_0_1.5_0.5_b128_e100_margin_0.2"
+QDRANT_URL = "http://localhost:6333"
 SIGNAL_CHANNELS = 64
 SIGNAL_SAMPLES = 320
+FIXED_RAW_SIGNAL_SAMPLES = 240
 VERIFICATION_THRESHOLD = 0.6216
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -159,6 +170,113 @@ def get_config(
     raise PredictionError(f"Unknown configuration: {config_id}")
 
 
+def fixed_eo_v4_config(
+    dataset_dir: Path = RAW_PREPROCESSED_DIR,
+    models_dir: Path = MODELS_DIR,
+) -> ModelConfig:
+    return ModelConfig(
+        data_type="eo",
+        window_token="15",
+        stride_token="05",
+        seed=0,
+        x_train_path=dataset_dir / "X_eo_train_15_05_seed0.npy",
+        y_train_path=dataset_dir / "y_eo_train_15_05_seed0.npy",
+        model_path=models_dir / FIXED_MODEL_FILENAME,
+    )
+
+
+def list_raw_subjects(dataset_files_dir: Path = RAW_DATASET_DIR) -> list[str]:
+    if not dataset_files_dir.exists():
+        return []
+
+    return sorted(
+        path.name
+        for path in dataset_files_dir.iterdir()
+        if path.is_dir() and re.fullmatch(r"S\d{3}", path.name)
+    )
+
+
+def subject_edf_path(subject_id: str, dataset_files_dir: Path = RAW_DATASET_DIR) -> Path:
+    if not re.fullmatch(r"S\d{3}", subject_id):
+        raise PredictionError(f"Invalid subject ID: {subject_id}")
+
+    subject_dir = dataset_files_dir / subject_id
+    if not subject_dir.is_dir():
+        raise PredictionError(f"Subject folder not found: {subject_id}")
+
+    edf_path = subject_dir / f"{subject_id}R01.edf"
+    if not edf_path.exists():
+        raise PredictionError(f"Raw EO file not found: {edf_path.name}")
+
+    return edf_path
+
+
+def load_raw_eo_subject(subject_id: str, dataset_files_dir: Path = RAW_DATASET_DIR):
+    edf_path = subject_edf_path(subject_id, dataset_files_dir)
+    try:
+        raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
+    except Exception as exc:
+        raise PredictionError(f"Could not load raw EO file: {edf_path.name}") from exc
+
+    renamed = {channel: channel.replace(".", "") for channel in raw.ch_names}
+    raw.rename_channels(renamed)
+    return raw
+
+
+def window_raw_signal(raw, window_size: float = 1.5, stride: float = 0.5) -> np.ndarray:
+    sfreq = float(raw.info["sfreq"])
+    window_samples = int(window_size * sfreq)
+    stride_samples = int(stride * sfreq)
+    data = raw.get_data()
+
+    windows = [
+        data[:, start : start + window_samples]
+        for start in range(0, data.shape[1] - window_samples + 1, stride_samples)
+    ]
+    if not windows:
+        raise PredictionError("Preprocessing produced no windows")
+
+    return np.asarray(windows)
+
+
+def butter_bandpass_filter(
+    data: np.ndarray,
+    lowcut: float = 4,
+    highcut: float = 40,
+    fs: float = 160,
+    order: int = 5,
+) -> np.ndarray:
+    nyquist = 0.5 * fs
+    b, a = butter(order, [lowcut / nyquist, highcut / nyquist], btype="band")
+    filtered = np.zeros_like(data)
+    for index in range(data.shape[0]):
+        for channel in range(data.shape[1]):
+            filtered[index, channel, :] = filtfilt(b, a, data[index, channel, :])
+    return filtered
+
+
+def preprocess_raw_eo_subject(
+    subject_id: str,
+    dataset_files_dir: Path = RAW_DATASET_DIR,
+) -> np.ndarray:
+    raw = load_raw_eo_subject(subject_id, dataset_files_dir)
+    sfreq = float(raw.info["sfreq"])
+    duration = raw.n_times / sfreq
+    if duration > 60:
+        raw.crop(tmin=0.0, tmax=60.0, include_tmax=False)
+
+    windows = window_raw_signal(raw, window_size=1.5, stride=0.5)
+    if windows.shape[1] != SIGNAL_CHANNELS:
+        raise PredictionError(
+            f"Expected {SIGNAL_CHANNELS} EEG channels after preprocessing; got {windows.shape[1]}"
+        )
+
+    filtered = butter_bandpass_filter(windows, lowcut=4, highcut=40, fs=sfreq, order=5)
+    normalized = zscore(filtered, axis=2)
+    normalized = np.nan_to_num(normalized, copy=False)
+    return validate_signal_array(normalized.astype(np.float32, copy=False), expected_samples=FIXED_RAW_SIGNAL_SAMPLES)
+
+
 def array_from_npy_bytes(content: bytes) -> np.ndarray:
     try:
         return np.load(io.BytesIO(content), allow_pickle=False)
@@ -217,13 +335,93 @@ def identify_from_embeddings(
         ]
         windows.append(
             {
-                "predicted_subject_id": int(labels[best_index]),
+                "predicted_subject_id": int(labels[best_index])+1,
                 "similarity": float(row[best_index]),
                 "top_matches": top_matches,
             }
         )
 
     return {"windows": windows}
+
+
+def qdrant_collection_name() -> str:
+    return os.getenv("QDRANT_COLLECTION", QDRANT_COLLECTION_NAME)
+
+
+def qdrant_url() -> str:
+    return os.getenv("QDRANT_URL", QDRANT_URL)
+
+
+def get_qdrant_client() -> QdrantClient:
+    return QdrantClient(url=qdrant_url())
+
+
+def _qdrant_distance_name(distance: Any) -> str:
+    value = getattr(distance, "value", distance)
+    return str(value).lower()
+
+
+def validate_qdrant_collection(client: QdrantClient, collection_name: str) -> None:
+    try:
+        collection = client.get_collection(collection_name)
+    except Exception as exc:
+        raise PredictionError(f"Qdrant collection '{collection_name}' is not available") from exc
+
+    vectors = collection.config.params.vectors
+    distance = getattr(vectors, "distance", None)
+    if distance is None and isinstance(vectors, dict):
+        distance = next((getattr(vector, "distance", None) for vector in vectors.values()), None)
+
+    if "euclid" not in _qdrant_distance_name(distance):
+        raise PredictionError(f"Qdrant collection '{collection_name}' must use Euclidean distance")
+
+
+def identify_from_qdrant_embeddings(
+    query_embeddings: np.ndarray,
+    client: QdrantClient,
+    collection_name: str,
+    top_k: int = 5,
+) -> dict:
+    limit = max(1, top_k)
+    search_params = models.SearchParams(hnsw_ef=128, exact=False)
+    windows: list[dict] = []
+
+    for embedding in np.asarray(query_embeddings, dtype=np.float32):
+        try:
+            result = client.query_points(
+                collection_name=collection_name,
+                query=embedding.tolist(),
+                limit=limit,
+                with_payload=True,
+                search_params=search_params,
+            )
+        except Exception as exc:
+            raise PredictionError(f"Qdrant search failed for collection '{collection_name}'") from exc
+
+        points = result.points
+        if not points:
+            raise PredictionError(f"Qdrant collection '{collection_name}' returned no matches")
+
+        top_matches = [
+            {
+                "subject_id": int(point.payload["subject_id"]),
+                "distance": float(point.score),
+            }
+            for point in points
+        ]
+        windows.append(
+            {
+                "predicted_subject_id": top_matches[0]["subject_id"]+1,
+                "distance": top_matches[0]["distance"],
+                "top_matches": top_matches,
+            }
+        )
+
+    return {"windows": windows}
+
+
+def verification_threshold() -> float:
+    return float(os.getenv("VERIFICATION_DISTANCE_THRESHOLD", VERIFICATION_THRESHOLD))
 
 
 def aggregate_window_results(
@@ -235,23 +433,50 @@ def aggregate_window_results(
 
     vote_counts = Counter(int(window["predicted_subject_id"]) for window in window_results)
     predicted_subject_id, vote_count = vote_counts.most_common(1)[0]
-    similarities = np.array([float(window["similarity"]) for window in window_results], dtype=np.float32)
-    max_similarity = float(np.max(similarities))
     result = {
         "predicted_subject_id": int(predicted_subject_id),
         "vote_count": int(vote_count),
         "window_count": len(window_results),
-        "mean_similarity": float(np.mean(similarities)),
-        "max_similarity": max_similarity,
         "windows": window_results,
     }
 
+    if "distance" in window_results[0]:
+        distances = np.array([float(window["distance"]) for window in window_results], dtype=np.float32)
+        min_distance = float(np.min(distances))
+        threshold = verification_threshold()
+        result.update(
+            {
+                "mean_distance": float(np.mean(distances)),
+                "min_distance": min_distance,
+            }
+        )
+        if claimed_subject_id is not None:
+            accepted = predicted_subject_id == claimed_subject_id and min_distance <= threshold
+            result.update(
+                {
+                    "claimed_subject_id": int(claimed_subject_id),
+                    "verification_threshold": threshold,
+                    "accepted": bool(accepted),
+                }
+            )
+        return result
+
+    similarities = np.array([float(window["similarity"]) for window in window_results], dtype=np.float32)
+    max_similarity = float(np.max(similarities))
+    result.update(
+        {
+            "mean_similarity": float(np.mean(similarities)),
+            "max_similarity": max_similarity,
+        }
+    )
+
     if claimed_subject_id is not None:
-        accepted = predicted_subject_id == claimed_subject_id and max_similarity >= VERIFICATION_THRESHOLD
+        threshold = verification_threshold()
+        accepted = predicted_subject_id == claimed_subject_id and max_similarity >= threshold
         result.update(
             {
                 "claimed_subject_id": int(claimed_subject_id),
-                "verification_threshold": VERIFICATION_THRESHOLD,
+                "verification_threshold": threshold,
                 "accepted": bool(accepted),
             }
         )
@@ -335,7 +560,7 @@ def embed_signals(
 
     if not chunks:
         raise PredictionError("No signals were available for embedding")
-    return normalize_embeddings(np.concatenate(chunks, axis=0))
+    return np.concatenate(chunks, axis=0)
 
 
 def load_or_build_gallery(config: ModelConfig, model, device: str) -> Gallery:
@@ -400,6 +625,42 @@ def predict_signal(
             "config_id": config.config_id,
             "config_name": config.display_name,
             "device": device,
+        }
+    )
+    return result
+
+
+def predict_raw_subject(
+    subject_id: str,
+    claimed_subject_id: int | None = None,
+    top_k: int = 5,
+) -> dict:
+    config = fixed_eo_v4_config()
+    expected_samples = expected_samples_for_config(config)
+    signals = preprocess_raw_eo_subject(subject_id)
+    signals = validate_signal_array(signals, expected_samples=expected_samples)
+    model, device = load_model(config)
+    query_embeddings = embed_signals(model, signals, device, expected_samples=expected_samples)
+    qdrant_client = get_qdrant_client()
+    collection_name = qdrant_collection_name()
+    validate_qdrant_collection(qdrant_client, collection_name)
+    identified = identify_from_qdrant_embeddings(
+        query_embeddings=query_embeddings,
+        client=qdrant_client,
+        collection_name=collection_name,
+        top_k=top_k,
+    )
+    result = aggregate_window_results(
+        identified["windows"],
+        claimed_subject_id=claimed_subject_id,
+    )
+    result.update(
+        {
+            "config_id": config.config_id,
+            "config_name": config.display_name,
+            "device": device,
+            "subject_id": subject_id,
+            "qdrant_collection": collection_name,
         }
     )
     return result

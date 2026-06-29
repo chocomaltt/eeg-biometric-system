@@ -8,9 +8,12 @@ dependencies = [
     "fastapi",
     "httpx",
     "jinja2",
+    "mne",
     "numpy",
     "pytest",
     "python-multipart",
+    "qdrant-client",
+    "scipy",
     "torch",
     "uvicorn",
 ]

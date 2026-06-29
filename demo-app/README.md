@@ -1,57 +1,52 @@
 # EEG Biometric Demo App
 
-FastAPI web demo for EEG biometric identification and verification using preprocessed `.npy` signals.
+FastAPI web demo for EEG biometric identification and verification using raw EO EEG files from `../Dataset/files/`. Prediction uses an existing Qdrant collection for HNSW nearest-neighbor search with Euclidean distance.
 
 ## Input
 
-Upload a NumPy `.npy` file containing either:
+Select a subject folder such as `S001` from the form. The app loads that subject's EO/R01 file from:
 
-- one preprocessed EEG window shaped `(64, 320)`, or
-- a batch shaped `(N, 64, 320)`.
+```text
+../Dataset/files/<subject>/<subject>R01.edf
+```
 
-The app does not preprocess raw EEG files in this first version.
+The app preprocesses the raw EDF during prediction:
+
+- remove `.` from channel names,
+- crop to the first 60 seconds when longer than 60 seconds,
+- create 1.5 second windows with 0.5 second stride,
+- apply Butterworth bandpass filtering from 4–40 Hz with order 5,
+- apply z-score normalization along each window's time axis.
 
 ## Prediction
 
-The form lets you select a discovered local configuration from:
+The app uses one fixed local model/configuration and queries Qdrant for enrollment matches:
 
-- `../Dataset/preprocessed_research_final_v4_90/`
-- `../models/`
+- model: `../models/embedding_v4_eo_train_80_0_1.5_0.5_b128_e100_margin_0.2.pth`
+- Qdrant URL: `http://localhost:6333` by default, override with `QDRANT_URL`
+- Qdrant collection: `embedding_v4_eo_train_80_0_1.5_0.5_b128_e100_margin_0.2` by default, override with `QDRANT_COLLECTION`
+- Qdrant collection distance: Euclidean (`Distance.EUCLID`)
+- display name: `EO | window 1.5s | stride 0.5s | seed 0`
+
+The app validates that the configured Qdrant collection exists and uses Euclidean distance before querying it. Search requests use Qdrant HNSW search parameters with `exact=False`.
 
 The app returns:
 
 - predicted subject ID,
 - vote count,
-- mean and max similarity,
-- top matches per uploaded window,
+- mean and minimum Euclidean distance,
+- top matches per preprocessed window,
 - verification accept/reject when a claimed subject ID is provided.
 
-Verification uses fixed threshold `0.6216`.
+For Euclidean distance, lower is better. Verification accepts when the predicted subject matches the claim and the minimum distance is at or below the threshold. The default distance threshold is `0.6216`; override it with `VERIFICATION_DISTANCE_THRESHOLD`.
 
 ## Run
 
+Start Qdrant and ensure the collection exists before running the app.
+
 ```bash
 cd demo-app
-uvicorn main:app --reload
+uv run uvicorn main:app --reload
 ```
 
 Open <http://127.0.0.1:8000/>.
-
-## Create a sample upload from the test set
-
-```bash
-cd /home/chocomaltt/Kuliah/eeg-biometric-system
-python - <<'PY'
-from pathlib import Path
-import numpy as np
-base = Path('Dataset/preprocessed_research_final_v4_90')
-X = np.load(base / 'X_eo_test_2_1_seed42.npy')
-out = Path('demo-app/sample_eo_2_1_seed42.npy')
-np.save(out, X[0])
-print(out)
-PY
-```
-
-Upload `demo-app/sample_eo_2_1_seed42.npy` and select `EO | window 2s | stride 1s | seed 42`.
-
-The first prediction for a configuration can take longer because the app builds the local embedding gallery cache.

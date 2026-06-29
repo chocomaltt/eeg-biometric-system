@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from prediction import (
+    FIXED_MODEL_FILENAME,
     PredictionError,
-    array_from_npy_bytes,
-    discover_configurations,
-    predict_signal,
+    list_raw_subjects,
+    predict_raw_subject,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -23,15 +23,17 @@ def _template_context(
     request: Request,
     result: dict | None = None,
     error: str | None = None,
-    selected_config_id: str | None = None,
+    selected_subject_id: str | None = None,
 ) -> dict:
-    configs = discover_configurations()
+    subjects = list_raw_subjects()
     return {
         "request": request,
-        "configs": configs,
+        "subjects": subjects,
         "result": result,
         "error": error,
-        "selected_config_id": selected_config_id,
+        "selected_subject_id": selected_subject_id,
+        "fixed_model_filename": FIXED_MODEL_FILENAME,
+        "fixed_config_name": "EO | window 1.5s | stride 0.5s | seed 0",
     }
 
 
@@ -48,27 +50,20 @@ def index(request: Request):
 @app.post("/predict", response_class=HTMLResponse)
 async def predict(
     request: Request,
-    config_id: str = Form(...),
+    subject_id: str = Form(...),
     claimed_subject_id: str = Form(""),
-    signal_file: UploadFile = File(...),
 ):
-    selected_config_id = config_id
+    selected_subject_id = subject_id
     try:
-        filename = signal_file.filename or ""
-        if not filename.endswith(".npy"):
-            raise PredictionError("Please upload a .npy file")
-
         claimed_id = int(claimed_subject_id) if claimed_subject_id.strip() else None
-        content = await signal_file.read()
-        array = array_from_npy_bytes(content)
-        result = predict_signal(config_id, array, claimed_subject_id=claimed_id)
+        result = predict_raw_subject(subject_id, claimed_subject_id=claimed_id)
         return templates.TemplateResponse(
             request,
             "index.html",
             _template_context(
                 request,
                 result=result,
-                selected_config_id=selected_config_id,
+                selected_subject_id=selected_subject_id,
             ),
         )
     except ValueError:
@@ -84,7 +79,7 @@ async def predict(
         _template_context(
             request,
             error=error,
-            selected_config_id=selected_config_id,
+            selected_subject_id=selected_subject_id,
         ),
     )
 
