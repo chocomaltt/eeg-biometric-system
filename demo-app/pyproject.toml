@@ -17,3 +17,6 @@ dependencies = [
     "torch",
     "uvicorn",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

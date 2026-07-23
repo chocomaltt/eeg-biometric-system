@@ -21,7 +21,7 @@
 </head>
 <body>
     <h1>EEG Biometric Demo</h1>
-    <p class="muted">Select a raw EEG subject folder to run the fixed EO/R01 subject prediction model.</p>
+    <p class="muted">Select registered raw EEG data or an unregistered BCICIV MATLAB file to run biometric verification.</p>
 
     {% if error %}
     <div class="card error">
@@ -31,12 +31,19 @@
 
     <form action="/predict" method="post" class="card">
         <p class="hint">
-            Using fixed model <code>{{ fixed_model_filename }}</code><br>
+            Existing registered-sample flow uses fixed model <code>{{ fixed_model_filename }}</code><br>
             Configuration: {{ fixed_config_name }}. Raw EO/R01 files are loaded from <code>../Dataset/files/</code>.
         </p>
 
+        <label for="dataset_type">Data section</label>
+        <select id="dataset_type" name="dataset_type" required>
+            <option value="raw_subject" {% if selected_dataset_type == "raw_subject" %}selected{% endif %}>Registered sample subjects</option>
+            <option value="bciciv" {% if selected_dataset_type == "bciciv" %}selected{% endif %}>Unregistered BCICIV access attempts</option>
+        </select>
+
+        <h2>Registered sample subjects</h2>
         <label for="subject_id">Subject</label>
-        <select id="subject_id" name="subject_id" required>
+        <select id="subject_id" name="subject_id">
             {% for subject in subjects %}
             <option value="{{ subject }}" {% if subject == selected_subject_id %}selected{% endif %}>{{ subject }}</option>
             {% endfor %}
@@ -45,10 +52,34 @@
         <p class="error card">No subject folders were found under Dataset/files.</p>
         {% endif %}
 
-        <label for="claimed_subject_id">Claimed subject ID for verification</label>
-        <input id="claimed_subject_id" name="claimed_subject_id" type="number" min="0" placeholder="Leave blank for identification only">
+        <h2>Unregistered BCICIV access attempts</h2>
+        <p class="muted">BCICIV files are treated as unregistered users attempting to authenticate as the claimed subject.</p>
+        <label for="bciciv_file">BCICIV MATLAB file</label>
+        <select id="bciciv_file" name="bciciv_file">
+            {% for file_name in bciciv_files %}
+            <option value="{{ file_name }}" {% if file_name == selected_bciciv_file %}selected{% endif %}>{{ file_name }}</option>
+            {% endfor %}
+        </select>
+        {% if not bciciv_files %}
+        <p class="error card">No BCICIV calibration files were found under Dataset/BCICIV_1calib_1000Hz_mat.</p>
+        {% endif %}
 
-        <button type="submit" {% if not subjects %}disabled{% endif %}>Predict</button>
+        <label for="bciciv_model_type">BCICIV evaluation checkpoint</label>
+        <select id="bciciv_model_type" name="bciciv_model_type">
+            {% for option in bciciv_model_options %}
+            <option value="{{ option.value }}" {% if option.value == selected_bciciv_model_type %}selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="claimed_account">Account for verification</label>
+        <select id="claimed_account" name="claimed_account">
+            <option value="" {% if not selected_claimed_account %}selected{% endif %}>No account claim — identification only</option>
+            {% for account in accounts %}
+            <option value="{{ account.code }}" {% if account.code == selected_claimed_account %}selected{% endif %}>{{ account.label }}</option>
+            {% endfor %}
+        </select>
+
+        <button type="submit" {% if not subjects and not bciciv_files %}disabled{% endif %}>Predict</button>
     </form>
 
     {% if result %}
@@ -62,7 +93,11 @@
         {% if result.subject_id is defined %}
         <p><strong>Input Subject:</strong> {{ result.subject_id }}</p>
         {% endif %}
-        <p><strong>Predicted Subject:</strong> {{ result.predicted_subject_id }}</p>
+        {% if result.bciciv_file is defined %}
+        <p><strong>Input File:</strong> {{ result.bciciv_file }}</p>
+        <p><strong>Input Dataset:</strong> {{ result.input_dataset }}</p>
+        {% endif %}
+        <p><strong>Predicted Account:</strong> {{ result.predicted_subject_display }}</p>
         <p><strong>Vote Count:</strong> {{ result.vote_count }} / {{ result.window_count }}</p>
         {% if result.mean_distance is defined %}
         <p><strong>Mean Distance:</strong> {{ "%.4f"|format(result.mean_distance) }}</p>
@@ -72,8 +107,10 @@
         <p><strong>Max Similarity:</strong> {{ "%.4f"|format(result.max_similarity) }}</p>
         {% endif %}
 
+        <p><strong>Acceptance Status:</strong> {% if result.accepted is defined %}{% if result.accepted %}Accepted{% else %}Rejected{% endif %}{% else %}Not evaluated — select an account for verification{% endif %}</p>
+
         {% if result.claimed_subject_id is defined %}
-        <p><strong>Claimed Subject:</strong> {{ result.claimed_subject_id }}</p>
+        <p><strong>Claimed Account:</strong> {{ result.claimed_subject_display }}</p>
         <p><strong>Distance Threshold:</strong> {{ "%.4f"|format(result.verification_threshold) }}</p>
         <p><strong>Verification:</strong> {% if result.accepted %}Accepted{% else %}Rejected{% endif %}</p>
         {% endif %}
@@ -92,7 +129,7 @@
                 {% for window in result.windows %}
                 <tr>
                     <td>{{ loop.index }}</td>
-                    <td>{{ window.predicted_subject_id }}</td>
+                    <td>{{ window.predicted_subject_display }}</td>
                     <td>
                         {% if window.distance is defined %}
                             {{ "%.4f"|format(window.distance) }}
@@ -103,9 +140,9 @@
                     <td>
                         {% for match in window.top_matches %}
                             {% if match.distance is defined %}
-                                {{ match.subject_id }} ({{ "%.4f"|format(match.distance) }}){% if not loop.last %}, {% endif %}
+                                {{ match.subject_display }} ({{ "%.4f"|format(match.distance) }}){% if not loop.last %}, {% endif %}
                             {% else %}
-                                {{ match.subject_id }} ({{ "%.4f"|format(match.similarity) }}){% if not loop.last %}, {% endif %}
+                                {{ match.subject_display }} ({{ "%.4f"|format(match.similarity) }}){% if not loop.last %}, {% endif %}
                             {% endif %}
                         {% endfor %}
                     </td>
